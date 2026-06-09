@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_PREFIX="frontend-contractweb"
+
+usage() {
+  cat <<'USAGE'
+用法:
+  frontend-migrate <前端仓库url> <前端分支名> [选项]
+
+选项:
+  --prefix <目录名>   迁入到后端仓库里的目录，默认 frontend-contractweb
+  --squash            将前端提交历史压缩为一次提交
+  --dry-run           只打印将要执行的命令，不真正修改仓库
+  -h, --help          显示帮助
+
+示例:
+  frontend-migrate https://git.example.com/frontend.git v4.15.2
+  frontend-migrate https://git.example.com/frontend.git master --prefix frontend-operation
+  frontend-migrate https://git.example.com/frontend.git master --squash
+USAGE
+}
+
+die() {
+  printf '错误: %s\n' "$1" >&2
+  exit 1
+}
+
+print_cmd() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_cmd() {
+  print_cmd "$@"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    "$@"
+  fi
+}
+
+FRONT_REPO_URL=""
+FRONT_BRANCH=""
+PREFIX="$DEFAULT_PREFIX"
+SQUASH="0"
+DRY_RUN="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --prefix)
+      [[ $# -ge 2 ]] || die "--prefix 需要一个目录名"
+      PREFIX="$2"
+      shift 2
+      ;;
+    --prefix=*)
+      PREFIX="${1#--prefix=}"
+      shift
+      ;;
+    --squash)
+      SQUASH="1"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN="1"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "未知选项: $1"
+      ;;
+    *)
+      if [[ -z "$FRONT_REPO_URL" ]]; then
+        FRONT_REPO_URL="$1"
+      elif [[ -z "$FRONT_BRANCH" ]]; then
+        FRONT_BRANCH="$1"
+      else
+        die "参数过多: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+while [[ $# -gt 0 ]]; do
+  if [[ -z "$FRONT_REPO_URL" ]]; then
+    FRONT_REPO_URL="$1"
+  elif [[ -z "$FRONT_BRANCH" ]]; then
+    FRONT_BRANCH="$1"
+  else
+    die "参数过多: $1"
+  fi
+  shift
+done
+
+[[ -n "$FRONT_REPO_URL" ]] || die "缺少前端仓库 URL"
+[[ -n "$FRONT_BRANCH" ]] || die "缺少前端分支名"
+[[ -n "$PREFIX" ]] || die "--prefix 不能为空"
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  die "当前目录不是 git 仓库，请先进入后端工程本地仓库目录"
+fi
+
+BACKEND_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$BACKEND_BRANCH" == "HEAD" ]]; then
+  die "当前仓库处于 detached HEAD 状态，无法判断要推送的后端分支"
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  die "当前工作区不干净，请先提交或暂存已有改动后再迁移"
+fi
+
+if [[ -e "$PREFIX" ]]; then
+  die "目标目录已存在: $PREFIX"
+fi
+
+REMOTE_NAME="frontend-migrate-$$"
+REMOTE_ADDED="0"
+
+cleanup() {
+  if [[ "$REMOTE_ADDED" == "1" ]]; then
+    git remote remove "$REMOTE_NAME" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+printf '后端当前分支: %s\n' "$BACKEND_BRANCH"
+printf '前端迁入目录: %s\n' "$PREFIX"
+if [[ "$SQUASH" == "1" ]]; then
+  printf '提交历史处理: 压缩为一次提交\n'
+else
+  printf '提交历史处理: 保留完整历史\n'
+fi
+
+run_cmd git remote add "$REMOTE_NAME" "$FRONT_REPO_URL"
+REMOTE_ADDED="1"
+
+run_cmd git fetch "$REMOTE_NAME"
+
+SUBTREE_CMD=(git subtree add "--prefix=$PREFIX" "$REMOTE_NAME/$FRONT_BRANCH")
+if [[ "$SQUASH" == "1" ]]; then
+  SUBTREE_CMD+=(--squash)
+fi
+run_cmd "${SUBTREE_CMD[@]}"
+
+run_cmd git remote remove "$REMOTE_NAME"
+REMOTE_ADDED="0"
+
+run_cmd git push origin "$BACKEND_BRANCH"
+
+printf '迁移完成，已推送后端当前分支: %s\n' "$BACKEND_BRANCH"
